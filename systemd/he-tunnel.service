@@ -1,0 +1,16 @@
+[Unit]
+Description=HE Tunnel Broker Manager IPv6 Tunnel
+Documentation=https://tunnelbroker.net/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/he --apply
+ExecStop=/usr/local/bin/he --down
+TimeoutStartSec=30
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
