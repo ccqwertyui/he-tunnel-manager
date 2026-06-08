@@ -1322,3 +1322,20 @@ case "${1:-}" in
     exit 1
     ;;
 esac
+
+# === 出口模式配置 ===
+configure_exit_ip() {
+    if [ "$EXIT_MODE" = "64" ]; then
+        EXIT_IP="${ROUTED64%%/*}1"
+        ip addr add $EXIT_IP/64 dev he-ipv6
+        ip -6 route replace default dev he-ipv6 src $EXIT_IP
+        EXIT_DESC="Routed /64"
+    else
+        EXIT_IP="${ROUTED48%%/*}:1::1"
+        ip addr add $EXIT_IP/64 dev he-ipv6
+        ip -6 route replace default dev he-ipv6 src $EXIT_IP
+        EXIT_DESC="Routed /48"
+    fi
+}
+# 调用配置函数
+configure_exit_ip
