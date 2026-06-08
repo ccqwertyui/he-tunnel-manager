@@ -4,7 +4,7 @@
 
 set -o pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 APP_NAME="HE Tunnel Broker Manager"
 
 CONFIG_DIR="${CONFIG_DIR:-/etc/he-tunnel}"
@@ -52,6 +52,7 @@ DNS="Cloudflare"
 MTU="1280"
 AUTOSTART="0"
 FIREWALL="0"
+EXIT_MODE="48"
 
 print_ok() { printf "%b\n" "${GREEN}$*${RESET}"; }
 print_warn() { printf "%b\n" "${YELLOW}$*${RESET}"; }
@@ -91,6 +92,7 @@ load_config() {
   MTU="1280"
   AUTOSTART="0"
   FIREWALL="0"
+  EXIT_MODE="48"
 
   if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck source=/dev/null
@@ -101,6 +103,11 @@ load_config() {
   MTU="${MTU:-1280}"
   AUTOSTART="${AUTOSTART:-0}"
   FIREWALL="${FIREWALL:-0}"
+  EXIT_MODE="${EXIT_MODE:-48}"
+  case "$EXIT_MODE" in
+    64|Routed64|routed64|ROUTED64|/64) EXIT_MODE="64" ;;
+    *) EXIT_MODE="48" ;;
+  esac
 }
 
 save_config() {
@@ -123,6 +130,7 @@ save_config() {
     printf 'MTU=%q\n' "$MTU"
     printf 'AUTOSTART=%q\n' "$AUTOSTART"
     printf 'FIREWALL=%q\n' "$FIREWALL"
+    printf 'EXIT_MODE=%q\n' "$EXIT_MODE"
   } > "$tmp"
 
   install -m 600 "$tmp" "$CONFIG_FILE"
@@ -159,6 +167,8 @@ print_config() {
   printf "CLIENT_IPV6：%s\n" "$(value_or_empty "$CLIENT_IPV6")"
   printf "ROUTED64：%s\n" "$(value_or_empty "$ROUTED64")"
   printf "ROUTED48：%s\n" "$(value_or_empty "$ROUTED48")"
+  printf "EXIT_MODE：%s\n" "$(exit_mode_label)"
+  printf "EXIT_IPV6：%s\n" "$(get_configured_exit_ipv6)"
   printf "DNS：%s\n" "$(value_or_empty "$DNS")"
   printf "MTU：%s\n" "$(value_or_empty "$MTU")"
   printf "AUTOSTART：%s\n" "$(yes_no_label "$AUTOSTART")"
@@ -179,6 +189,16 @@ check_required_config() {
 
   if [[ -z "${MTU:-}" ]]; then
     print_err "缺少必填配置：MTU"
+    missing=1
+  fi
+
+  if [[ "${EXIT_MODE:-48}" == "48" && -z "${ROUTED48:-}" ]]; then
+    print_err "缺少 Routed /48 配置；当前出口模式为 Routed /48。"
+    missing=1
+  fi
+
+  if [[ "${EXIT_MODE:-48}" == "64" && -z "${ROUTED64:-}" ]]; then
+    print_err "缺少 Routed /64 配置；当前出口模式为 Routed /64。"
     missing=1
   fi
 
@@ -203,6 +223,124 @@ ensure_ipv6_prefix() {
     printf "%s/%s" "$value" "$prefix"
   fi
 }
+
+normalize_exit_mode() {
+  case "${EXIT_MODE:-48}" in
+    64|Routed64|routed64|ROUTED64|/64) printf "64" ;;
+    *) printf "48" ;;
+  esac
+}
+
+exit_mode_label() {
+  case "$(normalize_exit_mode)" in
+    64) printf "Routed /64" ;;
+    *) printf "Routed /48" ;;
+  esac
+}
+
+routed64_exit_ip() {
+  local prefix="${ROUTED64%%/*}"
+  prefix="${prefix%::}"
+  if [[ -z "$prefix" ]]; then
+    return 1
+  fi
+  printf "%s::1" "$prefix"
+}
+
+expand_ipv6_to_hextets_basic() {
+  local input="${1:-}"
+  local addr="${input%%/*}"
+  local left=""
+  local right=""
+  local missing=0
+  local i=0
+  local parts=()
+  local left_parts=()
+  local right_parts=()
+
+  if [[ -z "$addr" ]]; then
+    return 1
+  fi
+
+  if [[ "$addr" == *::* ]]; then
+    left="${addr%%::*}"
+    right="${addr##*::}"
+    if [[ -n "$left" ]]; then IFS=':' read -r -a left_parts <<< "$left"; fi
+    if [[ -n "$right" ]]; then IFS=':' read -r -a right_parts <<< "$right"; fi
+    missing=$((8 - ${#left_parts[@]} - ${#right_parts[@]}))
+    if (( missing < 0 )); then return 1; fi
+    parts=("${left_parts[@]}")
+    for ((i=0; i<missing; i++)); do parts+=("0"); done
+    parts+=("${right_parts[@]}")
+  else
+    IFS=':' read -r -a parts <<< "$addr"
+  fi
+
+  if (( ${#parts[@]} != 8 )); then return 1; fi
+  printf "%s\n" "${parts[@]}"
+}
+
+routed48_exit_ip() {
+  local prefix="${ROUTED48:-}"
+  local parts=()
+  if [[ -z "$prefix" ]]; then
+    return 1
+  fi
+  if ! mapfile -t parts < <(expand_ipv6_to_hextets_basic "$prefix"); then
+    return 1
+  fi
+  printf "%s:%s:%s:1::1" "${parts[0]}" "${parts[1]}" "${parts[2]}"
+}
+
+get_configured_exit_ipv6() {
+  case "$(normalize_exit_mode)" in
+    64) routed64_exit_ip 2>/dev/null || printf "未配置" ;;
+    *) routed48_exit_ip 2>/dev/null || printf "未配置" ;;
+  esac
+}
+
+remove_known_exit_addresses() {
+  local ip64="" ip48=""
+  ip64="$(routed64_exit_ip 2>/dev/null || true)"
+  ip48="$(routed48_exit_ip 2>/dev/null || true)"
+  if [[ -n "$ip64" && "$ip64" != "未配置" ]]; then
+    ip -6 addr del "$ip64/64" dev "$TUNNEL_NAME" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$ip48" && "$ip48" != "未配置" && "$ip48" != "$ip64" ]]; then
+    ip -6 addr del "$ip48/64" dev "$TUNNEL_NAME" >/dev/null 2>&1 || true
+  fi
+}
+
+apply_exit_route() {
+  require_root || return 1
+  if ! tunnel_exists; then
+    print_err "隧道接口不存在，无法配置出口 IPv6。"
+    return 1
+  fi
+
+  local exit_ip
+  exit_ip="$(get_configured_exit_ipv6)"
+  if [[ -z "$exit_ip" || "$exit_ip" == "未配置" ]]; then
+    print_err "无法生成出口 IPv6，请检查 ROUTED64/ROUTED48 与 EXIT_MODE。"
+    return 1
+  fi
+
+  remove_known_exit_addresses
+
+  if ! ip -6 addr replace "$exit_ip/64" dev "$TUNNEL_NAME"; then
+    print_err "添加出口 IPv6 失败：$exit_ip/64"
+    return 1
+  fi
+
+  if ! ip -6 route replace default dev "$TUNNEL_NAME" src "$exit_ip" metric 1; then
+    print_err "设置默认 IPv6 路由失败：default dev $TUNNEL_NAME src $exit_ip"
+    return 1
+  fi
+
+  print_ok "出口模式：$(exit_mode_label)"
+  print_ok "出口 IPv6：$exit_ip"
+}
+
 
 tunnel_exists() {
   has_cmd ip && ip link show dev "$TUNNEL_NAME" >/dev/null 2>&1
@@ -244,16 +382,31 @@ current_mtu() {
 }
 
 get_exit_ipv6() {
-  local ip=""
+  # 状态页显示配置生成的真实业务出口，不显示 Tunnel Client IPv6。
+  get_configured_exit_ipv6
+}
 
-  if has_cmd curl; then
-    ip="$(curl -6 -s --connect-timeout 2 --max-time 4 ip.sb 2>/dev/null | tr -d '[:space:]')"
-  elif has_cmd wget; then
-    ip="$(timeout 5 wget -qO- -6 https://ip.sb 2>/dev/null | tr -d '[:space:]')"
+curl_exit_ipv6() {
+  local exit_ip=""
+  local detected=""
+
+  exit_ip="$(get_configured_exit_ipv6)"
+  if [[ -z "$exit_ip" || "$exit_ip" == "未配置" ]]; then
+    printf "未获取"
+    return 0
   fi
 
-  if [[ -n "$ip" ]]; then
-    printf "%s" "$ip"
+  if has_cmd curl; then
+    detected="$(curl -6 -s --interface "$exit_ip" --connect-timeout 4 --max-time 8 ip.sb 2>/dev/null | tr -d '[:space:]')"
+    if [[ -z "$detected" ]]; then
+      detected="$(curl -6 -s --connect-timeout 4 --max-time 8 ip.sb 2>/dev/null | tr -d '[:space:]')"
+    fi
+  elif has_cmd wget; then
+    detected="$(timeout 8 wget -qO- -6 https://ip.sb 2>/dev/null | tr -d '[:space:]')"
+  fi
+
+  if [[ -n "$detected" ]]; then
+    printf "%s" "$detected"
   else
     printf "未获取"
   fi
@@ -354,10 +507,9 @@ apply_tunnel() {
     modprobe sit >/dev/null 2>&1 || true
   fi
 
-  local client_addr server_addr
+  local client_addr
 
   client_addr="$(ensure_ipv6_prefix "$CLIENT_IPV6" 64)"
-  server_addr="$(strip_prefix "$SERVER_IPV6")"
 
   printf "\n正在创建/重建 HE 隧道：%s\n" "$TUNNEL_NAME"
 
@@ -389,13 +541,10 @@ apply_tunnel() {
     return 1
   fi
 
-  printf "[4/5] 添加 IPv6 默认路由...\n"
-  if ! ip -6 route replace default via "$server_addr" dev "$TUNNEL_NAME" metric 1 >/dev/null 2>&1; then
-    ip -6 route replace default dev "$TUNNEL_NAME" metric 1 || {
-      print_err "添加 IPv6 默认路由失败。"
-      down_tunnel_quiet
-      return 1
-    }
+  printf "[4/5] 添加 Routed 出口 IPv6 并设置默认路由...\n"
+  if ! apply_exit_route; then
+    down_tunnel_quiet
+    return 1
   fi
 
   sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
@@ -495,6 +644,40 @@ ask_dns() {
         ;;
       *)
         print_warn "请输入 1、2 或 3。"
+        ;;
+    esac
+  done
+}
+
+ask_exit_mode() {
+  local var_name="$1"
+  local current="${2:-48}"
+  local choice=""
+
+  case "$current" in
+    64|Routed64|routed64|ROUTED64|/64) current="64" ;;
+    *) current="48" ;;
+  esac
+
+  while true; do
+    printf "请选择 IPv6 出口模式：\n\n"
+    printf "1. Routed /64\n"
+    printf "2. Routed /48（推荐，默认）\n\n"
+    printf "当前/默认：Routed /%s\n" "$current"
+    printf "请输入：\n> "
+    IFS= read -r choice || choice=""
+
+    case "$choice" in
+      1|64|/64)
+        printf -v "$var_name" "%s" "64"
+        return 0
+        ;;
+      2|48|/48|"")
+        printf -v "$var_name" "%s" "48"
+        return 0
+        ;;
+      *)
+        print_warn "请输入 1 或 2。"
         ;;
     esac
   done
@@ -621,6 +804,7 @@ create_tunnel_interactive() {
   ask_required "请输入 Tunnel Client IPv6：" CLIENT_IPV6 "$CLIENT_IPV6"
   ask_required "请输入 Routed /64：" ROUTED64 "$ROUTED64"
   ask_optional "请输入 Routed /48：" ROUTED48 "$ROUTED48"
+  ask_exit_mode EXIT_MODE "$EXIT_MODE"
   ask_dns DNS "$DNS"
   ask_mtu MTU "${MTU:-1280}"
   ask_yes_no "是否启用开机自启？" AUTOSTART "$(if [[ "${AUTOSTART:-0}" == "1" ]]; then printf "Y"; else printf "N"; fi)"
@@ -717,12 +901,24 @@ modify_tunnel_interactive() {
         ask_optional "请输入新的 Routed /48：" ROUTED48 "$ROUTED48"
         ;;
       7)
-        ask_dns DNS "$DNS"
+        ask_exit_mode EXIT_MODE "$EXIT_MODE"
+        save_config || { pause; continue; }
+        if tunnel_exists; then
+          printf "
+正在切换出口模式，无需重建隧道...
+"
+          apply_exit_route
+          pause
+          continue
+        fi
         ;;
       8)
-        ask_mtu MTU "$MTU"
+        ask_dns DNS "$DNS"
         ;;
       9)
+        ask_mtu MTU "$MTU"
+        ;;
+      10)
         return 0
         ;;
       *)
@@ -742,37 +938,70 @@ modify_tunnel_interactive() {
 show_status_and_config() {
   load_config
   clear_screen
-  printf "=================================\n"
-  printf "隧道状态与当前配置\n"
-  printf "=================================\n\n"
+  printf "=================================
+"
+  printf "隧道状态与当前配置
+"
+  printf "=================================
 
-  printf "当前隧道状态：%s\n" "$(get_tunnel_status)"
-  printf "当前出口 IPv6：%s\n" "$(get_exit_ipv6)"
-  printf "当前 MTU：%s\n" "$(current_mtu)"
-  printf "开机自启：%s\n\n" "$(autostart_status)"
+"
 
-  printf "当前配置：\n\n"
+  printf "当前隧道状态：%s
+" "$(get_tunnel_status)"
+  printf "当前出口模式：%s
+" "$(exit_mode_label)"
+  printf "当前出口 IPv6：%s
+" "$(get_exit_ipv6)"
+  printf "curl 检测出口：%s
+" "$(curl_exit_ipv6)"
+  printf "当前 MTU：%s
+" "$(current_mtu)"
+  printf "开机自启：%s
+
+" "$(autostart_status)"
+
+  printf "当前配置：
+
+"
   print_config
 
   if tunnel_exists; then
-    printf "\n接口信息：\n"
+    printf "
+接口信息：
+"
     ip -brief addr show dev "$TUNNEL_NAME" 2>/dev/null || true
-    printf "\nIPv6 路由：\n"
+    printf "
+IPv6 路由：
+"
     ip -6 route show dev "$TUNNEL_NAME" 2>/dev/null || true
   else
-    printf "\n接口信息：%s 不存在。\n" "$TUNNEL_NAME"
+    printf "
+接口信息：%s 不存在。
+" "$TUNNEL_NAME"
   fi
 
   pause
 }
 
 show_exit_ipv6() {
+  load_config
   clear_screen
-  printf "=================================\n"
-  printf "查看出口 IPv6\n"
-  printf "=================================\n\n"
-  printf "执行：curl -6 ip.sb\n\n"
-  printf "当前出口 IPv6：%s\n" "$(get_exit_ipv6)"
+  printf "=================================
+"
+  printf "查看出口 IPv6
+"
+  printf "=================================
+
+"
+  printf "当前出口模式：%s
+" "$(exit_mode_label)"
+  printf "配置出口 IPv6：%s
+" "$(get_exit_ipv6)"
+  printf "执行：curl -6 --interface $(get_exit_ipv6) ip.sb
+
+"
+  printf "curl 检测出口：%s
+" "$(curl_exit_ipv6)"
   pause
 }
 
@@ -1212,14 +1441,29 @@ update_script() {
 render_header() {
   load_config
 
-  printf "=================================\n"
-  printf "%s%s%s\n" "$BOLD" "$APP_NAME" "$RESET"
-  printf "=================================\n\n"
+  printf "=================================
+"
+  printf "%s%s%s
+" "$BOLD" "$APP_NAME" "$RESET"
+  printf "=================================
 
-  printf "当前隧道状态：%s\n\n" "$(get_tunnel_status)"
-  printf "当前出口 IPv6：%s\n\n" "$(get_exit_ipv6)"
-  printf "当前 MTU：%s\n\n" "$(current_mtu)"
-  printf "开机自启：%s\n\n" "$(autostart_status)"
+"
+
+  printf "当前隧道状态：%s
+
+" "$(get_tunnel_status)"
+  printf "当前出口模式：%s
+
+" "$(exit_mode_label)"
+  printf "当前出口 IPv6：%s
+
+" "$(get_exit_ipv6)"
+  printf "当前 MTU：%s
+
+" "$(current_mtu)"
+  printf "开机自启：%s
+
+" "$(autostart_status)"
 }
 
 main_menu() {
@@ -1299,12 +1543,22 @@ case "${1:-}" in
     ;;
   --status|status)
     load_config
-    printf "当前隧道状态：%s\n" "$(get_tunnel_status)"
-    printf "当前出口 IPv6：%s\n" "$(get_exit_ipv6)"
-    printf "当前 MTU：%s\n" "$(current_mtu)"
-    printf "开机自启：%s\n\n" "$(autostart_status)"
+    printf "当前隧道状态：%s
+" "$(get_tunnel_status)"
+    printf "当前出口模式：%s
+" "$(exit_mode_label)"
+    printf "当前出口 IPv6：%s
+" "$(get_exit_ipv6)"
+    printf "curl 检测出口：%s
+" "$(curl_exit_ipv6)"
+    printf "当前 MTU：%s
+" "$(current_mtu)"
+    printf "开机自启：%s
+
+" "$(autostart_status)"
     print_config
     ;;
+
   --update|update)
     update_script
     ;;
@@ -1322,20 +1576,3 @@ case "${1:-}" in
     exit 1
     ;;
 esac
-
-# === 出口模式配置 ===
-configure_exit_ip() {
-    if [ "$EXIT_MODE" = "64" ]; then
-        EXIT_IP="${ROUTED64%%/*}1"
-        ip addr add $EXIT_IP/64 dev he-ipv6
-        ip -6 route replace default dev he-ipv6 src $EXIT_IP
-        EXIT_DESC="Routed /64"
-    else
-        EXIT_IP="${ROUTED48%%/*}:1::1"
-        ip addr add $EXIT_IP/64 dev he-ipv6
-        ip -6 route replace default dev he-ipv6 src $EXIT_IP
-        EXIT_DESC="Routed /48"
-    fi
-}
-# 调用配置函数
-configure_exit_ip

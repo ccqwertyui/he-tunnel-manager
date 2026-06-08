@@ -303,3 +303,20 @@ git pull
 3. 云厂商安全组、防火墙、机房 ACL 可能会阻止协议 41。
 4. `MTU` 默认使用 `1280`，如果你的链路稳定，可以自行测试更高值，例如 `1480`。
 5. 创建隧道会修改系统 IPv6 默认路由，请在生产环境操作前确认已有网络策略。
+
+
+## IPv6 出口模式
+
+本项目区分 Tunnel Client IPv6 与业务出口 IPv6。Tunnel Client IPv6 只用于 HE 隧道通信；实际公网出口使用 Routed /64 或 Routed /48 自动生成的 IPv6。默认出口模式为 Routed /48，会自动使用 `Routed /48` 的第一个 `/64`，例如 `2001:470:f8e6::/48` 会生成 `2001:470:f8e6:1::1/64` 并执行：
+
+```bash
+ip -6 route replace default dev he-ipv6 src <出口IPv6>
+```
+
+配置文件会保存：
+
+```bash
+EXIT_MODE=48
+```
+
+可在“修改 HE 隧道”菜单中切换 Routed /64 或 Routed /48 出口模式。
