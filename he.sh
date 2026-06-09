@@ -4,7 +4,7 @@
 
 set -o pipefail
 
-VERSION="1.1.2"
+VERSION="1.1.3"
 APP_NAME="HE Tunnel Broker Manager"
 
 CONFIG_DIR="${CONFIG_DIR:-/etc/he-tunnel}"
@@ -52,6 +52,8 @@ DNS="Cloudflare"
 MTU="1280"
 AUTOSTART="0"
 FIREWALL="0"
+BLOCK_PING="1"
+IPV6_PRIORITY="he"
 EXIT_MODE="48"
 
 print_ok() { printf "%b\n" "${GREEN}$*${RESET}"; }
@@ -92,6 +94,8 @@ load_config() {
   MTU="1280"
   AUTOSTART="0"
   FIREWALL="0"
+  BLOCK_PING="1"
+  IPV6_PRIORITY="he"
   EXIT_MODE="48"
 
   if [[ -f "$CONFIG_FILE" ]]; then
@@ -103,10 +107,22 @@ load_config() {
   MTU="${MTU:-1280}"
   AUTOSTART="${AUTOSTART:-0}"
   FIREWALL="${FIREWALL:-0}"
+  BLOCK_PING="${BLOCK_PING:-1}"
+  IPV6_PRIORITY="${IPV6_PRIORITY:-he}"
   EXIT_MODE="${EXIT_MODE:-48}"
   case "$EXIT_MODE" in
     64|Routed64|routed64|ROUTED64|/64) EXIT_MODE="64" ;;
     *) EXIT_MODE="48" ;;
+  esac
+
+  case "$IPV6_PRIORITY" in
+    native|Native|system|SYSTEM|原生|系统原生) IPV6_PRIORITY="native" ;;
+    *) IPV6_PRIORITY="he" ;;
+  esac
+
+  case "$BLOCK_PING" in
+    0|no|No|N|n|false|FALSE) BLOCK_PING="0" ;;
+    *) BLOCK_PING="1" ;;
   esac
 }
 
@@ -130,6 +146,8 @@ save_config() {
     printf 'MTU=%q\n' "$MTU"
     printf 'AUTOSTART=%q\n' "$AUTOSTART"
     printf 'FIREWALL=%q\n' "$FIREWALL"
+    printf 'BLOCK_PING=%q\n' "$BLOCK_PING"
+    printf 'IPV6_PRIORITY=%q\n' "$IPV6_PRIORITY"
     printf 'EXIT_MODE=%q\n' "$EXIT_MODE"
   } > "$tmp"
 
@@ -173,6 +191,8 @@ print_config() {
   printf "MTU：%s\n" "$(value_or_empty "$MTU")"
   printf "AUTOSTART：%s\n" "$(yes_no_label "$AUTOSTART")"
   printf "FIREWALL：%s\n" "$(enabled_label "$FIREWALL")"
+  printf "BLOCK_PING：%s\n" "$(enabled_label "$BLOCK_PING")"
+  printf "IPV6_PRIORITY：%s\n" "$(priority_label)"
 }
 
 check_required_config() {
@@ -235,6 +255,27 @@ exit_mode_label() {
   case "$(normalize_exit_mode)" in
     64) printf "Routed /64" ;;
     *) printf "Routed /48" ;;
+  esac
+}
+
+normalize_ipv6_priority() {
+  case "${IPV6_PRIORITY:-he}" in
+    native|Native|system|SYSTEM|原生|系统原生) printf "native" ;;
+    *) printf "he" ;;
+  esac
+}
+
+priority_label() {
+  case "$(normalize_ipv6_priority)" in
+    native) printf "系统原生 IPv6 优先" ;;
+    *) printf "HE 隧道 IPv6 优先" ;;
+  esac
+}
+
+he_route_metric() {
+  case "$(normalize_ipv6_priority)" in
+    native) printf "4096" ;;
+    *) printf "1" ;;
   esac
 }
 
@@ -332,13 +373,83 @@ apply_exit_route() {
     return 1
   fi
 
-  if ! ip -6 route replace default dev "$TUNNEL_NAME" src "$exit_ip" metric 1; then
-    print_err "设置默认 IPv6 路由失败：default dev $TUNNEL_NAME src $exit_ip"
+  local metric
+  metric="$(he_route_metric)"
+
+  ip -6 route del default dev "$TUNNEL_NAME" >/dev/null 2>&1 || true
+
+  if ! ip -6 route replace default dev "$TUNNEL_NAME" src "$exit_ip" metric "$metric"; then
+    print_err "设置默认 IPv6 路由失败：default dev $TUNNEL_NAME src $exit_ip metric $metric"
     return 1
   fi
 
   print_ok "出口模式：$(exit_mode_label)"
   print_ok "出口 IPv6：$exit_ip"
+  print_ok "IPv6 优先级：$(priority_label)，HE 默认路由 metric=$metric"
+}
+
+
+remove_block_ping_rules() {
+  if ! has_cmd ip6tables; then
+    return 0
+  fi
+
+  local ip64="" ip48="" ip=""
+  ip64="$(routed64_exit_ip 2>/dev/null || true)"
+  ip48="$(routed48_exit_ip 2>/dev/null || true)"
+
+  for ip in "$ip64" "$ip48"; do
+    [[ -z "$ip" || "$ip" == "未配置" ]] && continue
+    while ip6tables -C INPUT -i "$TUNNEL_NAME" -p ipv6-icmp --icmpv6-type echo-request -d "$ip/128" -j DROP >/dev/null 2>&1; do
+      ip6tables -D INPUT -i "$TUNNEL_NAME" -p ipv6-icmp --icmpv6-type echo-request -d "$ip/128" -j DROP >/dev/null 2>&1 || break
+    done
+  done
+}
+
+apply_block_ping_rules() {
+  require_root || return 1
+
+  if ! has_cmd ip6tables; then
+    print_warn "未检测到 ip6tables，无法配置禁止 Ping 规则。"
+    return 1
+  fi
+
+  if ! tunnel_exists; then
+    print_warn "隧道接口不存在，禁止 Ping 配置已保存，创建隧道后会自动应用。"
+    return 0
+  fi
+
+  local exit_ip
+  exit_ip="$(get_configured_exit_ipv6)"
+  if [[ -z "$exit_ip" || "$exit_ip" == "未配置" ]]; then
+    print_warn "出口 IPv6 未配置，无法添加禁止 Ping 规则。"
+    return 1
+  fi
+
+  remove_block_ping_rules
+
+  if [[ "${BLOCK_PING:-1}" == "1" ]]; then
+    ip6tables -I INPUT 1 -i "$TUNNEL_NAME" -p ipv6-icmp --icmpv6-type echo-request -d "$exit_ip/128" -j DROP >/dev/null 2>&1 || true
+    print_ok "已禁止外部 Ping 当前 HE 出口 IPv6：$exit_ip"
+  else
+    print_ok "已允许外部 Ping 当前 HE 出口 IPv6。"
+  fi
+}
+
+enable_block_ping() {
+  require_root || return 1
+  load_config
+  BLOCK_PING="1"
+  save_config || return 1
+  apply_block_ping_rules
+}
+
+disable_block_ping() {
+  require_root || return 1
+  load_config
+  BLOCK_PING="0"
+  save_config || return 1
+  apply_block_ping_rules
 }
 
 
@@ -556,6 +667,8 @@ apply_tunnel() {
     enable_firewall_rules
   fi
 
+  apply_block_ping_rules || true
+
   print_ok "HE 隧道配置完成。"
 }
 
@@ -688,6 +801,44 @@ ask_exit_mode() {
     esac
   done
 }
+ask_ipv6_priority() {
+  local var_name="$1"
+  local current="${2:-he}"
+  local choice=""
+
+  case "$current" in
+    native|Native|system|SYSTEM|原生|系统原生) current="native" ;;
+    *) current="he" ;;
+  esac
+
+  while true; do
+    printf "请选择系统 IPv6 出口优先级：
+
+"
+    printf "1. HE 隧道 IPv6 优先（推荐，默认）
+"
+    printf "2. 系统原生 IPv6 优先
+
+"
+    printf "请输入（当前/默认：%s）：" "$(if [[ "$current" == "native" ]]; then printf "系统原生 IPv6 优先"; else printf "HE 隧道 IPv6 优先"; fi)"
+    IFS= read -r choice || choice=""
+
+    case "$choice" in
+      1|he|HE|"")
+        printf -v "$var_name" "%s" "he"
+        return 0
+        ;;
+      2|native|Native|system|SYSTEM)
+        printf -v "$var_name" "%s" "native"
+        return 0
+        ;;
+      *)
+        print_warn "请输入 1 或 2。"
+        ;;
+    esac
+  done
+}
+
 ask_mtu() {
   local var_name="$1"
   local default="${2:-1280}"
@@ -808,6 +959,8 @@ create_tunnel_interactive() {
   ask_required "请输入 Routed /64：" ROUTED64 "$ROUTED64"
   ask_optional "请输入 Routed /48：" ROUTED48 "$ROUTED48"
   ask_exit_mode EXIT_MODE "$EXIT_MODE"
+  ask_ipv6_priority IPV6_PRIORITY "$IPV6_PRIORITY"
+  ask_yes_no "是否禁止外部 Ping HE 出口 IPv6？" BLOCK_PING "Y"
   ask_dns DNS "$DNS"
   ask_mtu MTU "${MTU:-1280}"
   ask_yes_no "是否启用开机自启？" AUTOSTART "$(if [[ "${AUTOSTART:-0}" == "1" ]]; then printf "Y"; else printf "N"; fi)"
@@ -877,9 +1030,11 @@ modify_tunnel_interactive() {
     printf "5. 修改 Routed /64\n"
     printf "6. 修改 Routed /48\n"
     printf "7. 修改 IPv6 出口模式\n"
-    printf "8. 修改 DNS\n"
-    printf "9. 修改 MTU\n"
-    printf "10. 返回\n\n"
+    printf "8. 修改 IPv6 优先级\n"
+    printf "9. 修改禁止外部 Ping\n"
+    printf "10. 修改 DNS\n"
+    printf "11. 修改 MTU\n"
+    printf "12. 返回\n\n"
     printf "请选择："
 
     local choice=""
@@ -915,12 +1070,29 @@ modify_tunnel_interactive() {
         fi
         ;;
       8)
-        ask_dns DNS "$DNS"
+        ask_ipv6_priority IPV6_PRIORITY "$IPV6_PRIORITY"
+        save_config || { pause; continue; }
+        if tunnel_exists; then
+          printf "\n正在切换 IPv6 优先级...\n"
+          apply_exit_route
+          pause
+          continue
+        fi
         ;;
       9)
-        ask_mtu MTU "$MTU"
+        ask_yes_no "是否禁止外部 Ping HE 出口 IPv6？" BLOCK_PING "$(if [[ "${BLOCK_PING:-1}" == "1" ]]; then printf "Y"; else printf "N"; fi)"
+        save_config || { pause; continue; }
+        apply_block_ping_rules
+        pause
+        continue
         ;;
       10)
+        ask_dns DNS "$DNS"
+        ;;
+      11)
+        ask_mtu MTU "$MTU"
+        ;;
+      12)
         return 0
         ;;
       *)
@@ -958,6 +1130,10 @@ show_status_and_config() {
 " "$(curl_exit_ipv6)"
   printf "当前 MTU：%s
 " "$(current_mtu)"
+  printf "IPv6 优先级：%s
+" "$(priority_label)"
+  printf "禁止外部 Ping：%s
+" "$(enabled_label "$BLOCK_PING")"
   printf "开机自启：%s
 
 " "$(autostart_status)"
@@ -1112,6 +1288,13 @@ enable_firewall_rules() {
   ip6tables -F "$FIREWALL_CHAIN" >/dev/null 2>&1 || true
 
   ip6tables -A "$FIREWALL_CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1 || true
+  if [[ "${BLOCK_PING:-1}" == "1" ]]; then
+    local exit_ip
+    exit_ip="$(get_configured_exit_ipv6)"
+    if [[ -n "$exit_ip" && "$exit_ip" != "未配置" ]]; then
+      ip6tables -A "$FIREWALL_CHAIN" -p ipv6-icmp --icmpv6-type echo-request -d "$exit_ip/128" -j DROP >/dev/null 2>&1 || true
+    fi
+  fi
   ip6tables -A "$FIREWALL_CHAIN" -p ipv6-icmp -j ACCEPT >/dev/null 2>&1 || true
   ip6tables -A "$FIREWALL_CHAIN" -p tcp --dport 22 -j ACCEPT >/dev/null 2>&1 || true
   ip6tables -A "$FIREWALL_CHAIN" -j DROP >/dev/null 2>&1 || true
@@ -1122,7 +1305,8 @@ enable_firewall_rules() {
 
   FIREWALL="1"
   save_config || true
-  print_ok "基础 IPv6 防火墙已启用：允许已建立连接、ICMPv6、SSH(22)，其余从 $TUNNEL_NAME 进入的入站流量将被丢弃。"
+  apply_block_ping_rules || true
+  print_ok "基础 IPv6 防火墙已启用：允许已建立连接、必要 ICMPv6、SSH(22)，其余从 $TUNNEL_NAME 进入的入站流量将被丢弃。"
 }
 
 disable_firewall_rules() {
@@ -1148,14 +1332,31 @@ firewall_menu() {
   while true; do
     load_config
     clear_screen
-    printf "=================================\n"
-    printf "IPv6 防火墙\n"
-    printf "=================================\n\n"
-    printf "当前状态：%s\n\n" "$(enabled_label "$FIREWALL")"
-    printf "1. 开启基础 IPv6 防火墙\n"
-    printf "2. 关闭基础 IPv6 防火墙\n"
-    printf "3. 查看当前 IPv6 防火墙规则\n"
-    printf "4. 返回\n\n"
+    printf "=================================
+"
+    printf "IPv6 防火墙
+"
+    printf "=================================
+
+"
+    printf "基础防火墙：%s
+" "$(enabled_label "$FIREWALL")"
+    printf "禁止外部 Ping 出口 IPv6：%s
+
+" "$(enabled_label "$BLOCK_PING")"
+    printf "1. 开启基础 IPv6 防火墙
+"
+    printf "2. 关闭基础 IPv6 防火墙
+"
+    printf "3. 禁止外部 Ping 当前 HE 出口 IPv6
+"
+    printf "4. 允许外部 Ping 当前 HE 出口 IPv6
+"
+    printf "5. 查看当前 IPv6 防火墙规则
+"
+    printf "6. 返回
+
+"
     printf "请选择："
 
     local choice=""
@@ -1171,13 +1372,72 @@ firewall_menu() {
         pause
         ;;
       3)
+        enable_block_ping
+        pause
+        ;;
+      4)
+        disable_block_ping
+        pause
+        ;;
+      5)
         if has_cmd ip6tables; then
           ip6tables -S "$FIREWALL_CHAIN" 2>/dev/null || print_warn "未找到 ${FIREWALL_CHAIN} 规则链。"
-          printf "\nINPUT 引用：\n"
-          ip6tables -S INPUT 2>/dev/null | grep "$FIREWALL_CHAIN" || true
+          printf "
+INPUT 中 HE 相关规则：
+"
+          ip6tables -S INPUT 2>/dev/null | grep -E "$FIREWALL_CHAIN|$TUNNEL_NAME" || true
         else
           print_warn "未检测到 ip6tables。"
         fi
+        pause
+        ;;
+      6)
+        return 0
+        ;;
+      *)
+        print_warn "无效选择。"
+        pause
+        ;;
+    esac
+  done
+}
+
+ipv6_priority_menu() {
+  require_root || { pause; return 1; }
+
+  while true; do
+    load_config
+    clear_screen
+    printf "=================================\n"
+    printf "IPv6 优先级切换\n"
+    printf "=================================\n\n"
+    printf "当前优先级：%s\n" "$(priority_label)"
+    printf "HE 出口 IPv6：%s\n\n" "$(get_exit_ipv6)"
+    printf "说明：HE 优先会把 he-ipv6 默认路由 metric 设为 1；系统原生优先会把 he-ipv6 默认路由 metric 设为 4096，保留 HE 作为备用。\n\n"
+    printf "1. HE 隧道 IPv6 优先（默认）\n"
+    printf "2. 系统原生 IPv6 优先\n"
+    printf "3. 查看当前 IPv6 默认路由\n"
+    printf "4. 返回\n\n"
+    printf "请选择："
+
+    local choice=""
+    IFS= read -r choice || choice=""
+
+    case "$choice" in
+      1)
+        IPV6_PRIORITY="he"
+        save_config || { pause; continue; }
+        if tunnel_exists; then apply_exit_route; else print_warn "隧道接口不存在，配置已保存，创建隧道后生效。"; fi
+        pause
+        ;;
+      2)
+        IPV6_PRIORITY="native"
+        save_config || { pause; continue; }
+        if tunnel_exists; then apply_exit_route; else print_warn "隧道接口不存在，配置已保存，创建隧道后生效。"; fi
+        pause
+        ;;
+      3)
+        ip -6 route show default 2>/dev/null || true
         pause
         ;;
       4)
@@ -1463,6 +1723,12 @@ render_header() {
   printf "当前 MTU：%s
 
 " "$(current_mtu)"
+  printf "IPv6 优先级：%s
+
+" "$(priority_label)"
+  printf "禁止外部 Ping：%s
+
+" "$(enabled_label "$BLOCK_PING")"
   printf "开机自启：%s
 
 " "$(autostart_status)"
@@ -1473,19 +1739,35 @@ main_menu() {
     clear_screen
     render_header
 
-    printf "1. 创建 HE 隧道\n"
-    printf "2. 删除 HE 隧道\n"
-    printf "3. 修改 HE 隧道\n"
-    printf "4. 查看隧道状态 / 当前配置\n"
-    printf "5. 查看出口 IPv6\n"
-    printf "6. 测试连通性\n"
-    printf "7. DNS 设置\n"
-    printf "8. MTU 设置\n"
-    printf "9. IPv6 防火墙\n"
-    printf "10. 开机自启管理\n"
-    printf "11. /48 IPv6 生成器\n"
-    printf "12. 更新脚本\n"
-    printf "13. 退出\n\n"
+    printf "1. 创建 HE 隧道
+"
+    printf "2. 删除 HE 隧道
+"
+    printf "3. 修改 HE 隧道
+"
+    printf "4. 查看隧道状态 / 当前配置
+"
+    printf "5. 查看出口 IPv6
+"
+    printf "6. 测试连通性
+"
+    printf "7. DNS 设置
+"
+    printf "8. MTU 设置
+"
+    printf "9. IPv6 防火墙
+"
+    printf "10. 开机自启管理
+"
+    printf "11. /48 IPv6 生成器
+"
+    printf "12. IPv6 优先级切换
+"
+    printf "13. 更新脚本
+"
+    printf "14. 退出
+
+"
     printf "请选择："
 
     local choice=""
@@ -1503,9 +1785,11 @@ main_menu() {
       9) firewall_menu ;;
       10) autostart_menu ;;
       11) ipv6_48_generator ;;
-      12) update_script ;;
-      13)
-        printf "Bye.\n"
+      12) ipv6_priority_menu ;;
+      13) update_script ;;
+      14)
+        printf "Bye.
+"
         exit 0
         ;;
       *)
@@ -1555,6 +1839,10 @@ case "${1:-}" in
 " "$(curl_exit_ipv6)"
     printf "当前 MTU：%s
 " "$(current_mtu)"
+    printf "IPv6 优先级：%s
+" "$(priority_label)"
+    printf "禁止外部 Ping：%s
+" "$(enabled_label "$BLOCK_PING")"
     printf "开机自启：%s
 
 " "$(autostart_status)"

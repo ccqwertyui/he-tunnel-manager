@@ -1,6 +1,6 @@
 # HE Tunnel Broker Manager
 
-一个用于管理 Hurricane Electric Tunnel Broker IPv6 隧道的一键式交互管理工具。安装后输入 `he` 即可进入完整菜单，支持创建、删除、修改、状态查看、出口 IPv6 检测、连通性测试、DNS、MTU、IPv6 防火墙、systemd 开机自启、`/48` 到 `/64` 子网生成和脚本更新。
+一个用于管理 Hurricane Electric Tunnel Broker IPv6 隧道的一键式交互管理工具。安装后输入 `he` 即可进入完整菜单，支持创建、删除、修改、状态查看、出口 IPv6 检测、连通性测试、DNS、MTU、IPv6 防火墙、禁止外部 Ping HE 出口 IPv6、系统原生 IPv6 / HE 隧道 IPv6 优先级切换、systemd 开机自启、`/48` 到 `/64` 子网生成和脚本更新。
 
 > 目标风格：类似 3x-ui、realm.sh、LiteNet 的交互式管理面板，而不是单次执行的一次性 Bash 脚本。
 
@@ -56,6 +56,8 @@ HE Tunnel Broker Manager
 当前出口模式：Routed /48
 当前出口 IPv6：2001:db8:f8e6:1::1
 当前 MTU：1280
+IPv6 优先级：HE 隧道 IPv6 优先
+禁止外部 Ping：已启用 / 未启用
 开机自启：已启用 / 未启用
 
 1. 创建 HE 隧道
@@ -69,8 +71,9 @@ HE Tunnel Broker Manager
 9. IPv6 防火墙
 10. 开机自启管理
 11. /48 IPv6 生成器
-12. 更新脚本
-13. 退出
+12. IPv6 优先级切换
+13. 更新脚本
+14. 退出
 ```
 
 ## 创建隧道流程
@@ -91,6 +94,14 @@ HE Tunnel Broker Manager
 2. Routed /48（推荐，默认）
 
 请输入（当前/默认：Routed /48）：2
+
+请选择系统 IPv6 出口优先级：
+
+1. HE 隧道 IPv6 优先（推荐，默认）
+2. 系统原生 IPv6 优先
+
+请输入（当前/默认：HE 隧道 IPv6 优先）：1
+是否禁止外部 Ping HE 出口 IPv6？（Y/N，默认：Y）：Y
 
 请选择 DNS：
 
@@ -120,6 +131,8 @@ Routed /64：2001:db8:19:170::/64
 Routed /48：2001:db8:f8e6::/48
 出口模式：Routed /48
 出口 IPv6：2001:db8:f8e6:1::1
+IPv6 优先级：HE 隧道 IPv6 优先
+禁止外部 Ping 出口 IPv6：已启用
 DNS：Cloudflare
 MTU：1280
 开机自启：Yes
@@ -151,6 +164,8 @@ DNS=Cloudflare
 MTU=1280
 AUTOSTART=0
 FIREWALL=0
+BLOCK_PING=1
+IPV6_PRIORITY=he
 ```
 
 菜单中的 `4. 查看隧道状态 / 当前配置` 会直接读取这个配置文件并显示当前状态。
@@ -199,16 +214,63 @@ systemctl enable he-tunnel.service
 
 如果系统支持 `resolvectl` 或 `systemd-resolve`，脚本会尝试把 DNS 应用到隧道接口。如果系统不支持，会保存配置但不会强行覆盖 `/etc/resolv.conf`，避免破坏系统解析配置。
 
-## IPv6 防火墙
+## IPv6 防火墙与禁止 Ping
 
-`9. IPv6 防火墙` 提供基础入站保护。开启后会创建 `HE_TUNNEL_MANAGER` 链，并仅作用于 `he-ipv6` 隧道接口的入站流量：
+`9. IPv6 防火墙` 提供基础入站保护，并新增“禁止外部 Ping 当前 HE 出口 IPv6”功能。
+
+基础 IPv6 防火墙开启后会创建 `HE_TUNNEL_MANAGER` 链，并仅作用于 `he-ipv6` 隧道接口的入站流量：
 
 - 允许已建立连接
-- 允许 ICMPv6
+- 允许必要 ICMPv6
 - 允许 SSH 22 端口
 - 丢弃其余从 `he-ipv6` 进入的入站流量
 
+禁止 Ping 功能只拦截发往当前 HE 出口 IPv6 的 ICMPv6 `echo-request`，不会禁止所有 ICMPv6，避免影响 IPv6 邻居发现、路径 MTU 等基础功能。默认配置为：
+
+```bash
+BLOCK_PING=1
+```
+
+可在菜单中切换：
+
+```text
+9. IPv6 防火墙
+
+1. 开启基础 IPv6 防火墙
+2. 关闭基础 IPv6 防火墙
+3. 禁止外部 Ping 当前 HE 出口 IPv6
+4. 允许外部 Ping 当前 HE 出口 IPv6
+5. 查看当前 IPv6 防火墙规则
+6. 返回
+```
+
 注意：如果你的 SSH 端口不是 22，请先自行调整规则，避免误拦截管理入口。
+
+## IPv6 优先级切换
+
+`12. IPv6 优先级切换` 可以在系统原生 IPv6 和 HE 隧道 IPv6 之间切换默认出口优先级。默认配置为 HE 隧道 IPv6 优先：
+
+```bash
+IPV6_PRIORITY=he
+```
+
+模式说明：
+
+- `HE 隧道 IPv6 优先`：把 `he-ipv6` 默认 IPv6 路由 metric 设置为 `1`，优先走 HE 隧道出口。
+- `系统原生 IPv6 优先`：把 `he-ipv6` 默认 IPv6 路由 metric 设置为 `4096`，系统已有原生 IPv6 默认路由优先，HE 隧道保留为备用。
+
+菜单示例：
+
+```text
+12. IPv6 优先级切换
+
+1. HE 隧道 IPv6 优先（默认）
+2. 系统原生 IPv6 优先
+3. 查看当前 IPv6 默认路由
+4. 返回
+```
+
+切换后脚本会自动重写 HE 默认 IPv6 路由，无需重新创建隧道。
 
 ## /48 IPv6 生成器
 
@@ -248,7 +310,7 @@ systemctl enable he-tunnel.service
 
 ## 更新脚本
 
-菜单 `12. 更新脚本` 会优先尝试：
+菜单 `13. 更新脚本` 会优先尝试：
 
 ```bash
 git pull
@@ -296,7 +358,7 @@ git pull
 2. 如果服务器在 NAT 后面，需确认 HE 后台的 Client IPv4 与实际出口 IPv4 匹配。
 3. 云厂商安全组、防火墙、机房 ACL 可能会阻止协议 41。
 4. `MTU` 默认使用 `1280`，如果你的链路稳定，可以自行测试更高值，例如 `1480`。
-5. 创建隧道会修改系统 IPv6 默认路由，请在生产环境操作前确认已有网络策略。
+5. 创建隧道会修改系统 IPv6 默认路由；默认 HE 隧道 IPv6 优先，可在菜单 `12. IPv6 优先级切换` 中切换为系统原生 IPv6 优先。
 
 
 ## IPv6 出口模式
