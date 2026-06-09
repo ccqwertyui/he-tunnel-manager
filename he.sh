@@ -4,7 +4,7 @@
 
 set -o pipefail
 
-VERSION="1.1.1"
+VERSION="1.1.2"
 APP_NAME="HE Tunnel Broker Manager"
 
 CONFIG_DIR="${CONFIG_DIR:-/etc/he-tunnel}"

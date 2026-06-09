@@ -54,7 +54,7 @@ HE Tunnel Broker Manager
 
 当前隧道状态：已连接 / 未连接
 当前出口模式：Routed /48
-当前出口 IPv6：2001:470:f8e6:1::1
+当前出口 IPv6：2001:db8:f8e6:1::1
 当前 MTU：1280
 开机自启：已启用 / 未启用
 
@@ -78,12 +78,12 @@ HE Tunnel Broker Manager
 选择 `1. 创建 HE 隧道` 后，脚本会逐项引导输入，不会一次性要求填写全部参数。输入框采用单行格式，直接在提示后输入即可：
 
 ```text
-请输入 Tunnel Server IPv4：216.218.221.6
-请输入 Tunnel Client IPv4：91.233.10.68
-请输入 Tunnel Server IPv6：2001:470:18:171::1
-请输入 Tunnel Client IPv6：2001:470:18:171::2
-请输入 Routed /64：2001:470:19:170::/64
-请输入 Routed /48：2001:470:f8e6::/48
+请输入 Tunnel Server IPv4：x.x.x.x
+请输入 Tunnel Client IPv4：x.x.x.x
+请输入 Tunnel Server IPv6：2001:db8:18:171::1
+请输入 Tunnel Client IPv6：2001:db8:18:171::2
+请输入 Routed /64：2001:db8:19:170::/64
+请输入 Routed /48：2001:db8:f8e6::/48
 
 请选择 IPv6 出口模式：
 
@@ -103,7 +103,7 @@ HE Tunnel Broker Manager
 是否启用开机自启？（Y/N，默认：Y）：Y
 ```
 
-> 注意：`Tunnel Server IPv6` 和 `Tunnel Client IPv6` 如果在 HE 页面上显示为 `2001:470:18:171::1/64`、`2001:470:18:171::2/64`，填写时只填 IPv6 地址本身，不要带 `/64`。`Routed /64` 和 `Routed /48` 是路由前缀，需要保留 `/64`、`/48`。
+> 注意：`Tunnel Server IPv6` 和 `Tunnel Client IPv6` 如果在 HE 页面上显示为 `2001:db8:18:171::1/64`、`2001:db8:18:171::2/64`，填写时只填 IPv6 地址本身，不要带 `/64`。`Routed /64` 和 `Routed /48` 是路由前缀，需要保留 `/64`、`/48`。
 
 最后会显示配置确认：
 
@@ -112,14 +112,14 @@ HE Tunnel Broker Manager
 配置确认
 =================================
 
-Tunnel Server IPv4：216.218.221.6
-Tunnel Client IPv4：91.233.10.68
-Tunnel Server IPv6：2001:470:18:171::1
-Tunnel Client IPv6：2001:470:18:171::2
-Routed /64：2001:470:19:170::/64
-Routed /48：2001:470:f8e6::/48
+Tunnel Server IPv4：x.x.x.x
+Tunnel Client IPv4：x.x.x.x
+Tunnel Server IPv6：2001:db8:18:171::1
+Tunnel Client IPv6：2001:db8:18:171::2
+Routed /64：2001:db8:19:170::/64
+Routed /48：2001:db8:f8e6::/48
 出口模式：Routed /48
-出口 IPv6：2001:470:f8e6:1::1
+出口 IPv6：2001:db8:f8e6:1::1
 DNS：Cloudflare
 MTU：1280
 开机自启：Yes
@@ -219,32 +219,32 @@ systemctl enable he-tunnel.service
 ```text
 请选择：11
 
-请输入 Routed /48：2001:470:f8e6::/48
+请输入 Routed /48：2001:db8:f8e6::/48
 生成多少个 /64？默认：10：5
 起始子网 ID（十六进制，默认 0）：1
 
 生成结果：
 
-2001:470:f8e6:1::/64
-2001:470:f8e6:2::/64
-2001:470:f8e6:3::/64
-2001:470:f8e6:4::/64
-2001:470:f8e6:5::/64
+2001:db8:f8e6:1::/64
+2001:db8:f8e6:2::/64
+2001:db8:f8e6:3::/64
+2001:db8:f8e6:4::/64
+2001:db8:f8e6:5::/64
 ```
 
 参数说明：
 
-- `Routed /48`：填写 HE 后台给你的 `/48`，例如 `2001:470:f8e6::/48`。
+- `Routed /48`：填写 HE 后台给你的 `/48`，例如 `2001:db8:f8e6::/48`。
 - `生成多少个 /64`：要生成几个子网，默认生成 10 个。
-- `起始子网 ID`：从第几个 `/64` 开始生成，使用十六进制。例如输入 `1`，第一个结果就是 `2001:470:f8e6:1::/64`；输入 `10`，第一个结果就是 `2001:470:f8e6:10::/64`。
+- `起始子网 ID`：从第几个 `/64` 开始生成，使用十六进制。例如输入 `1`，第一个结果就是 `2001:db8:f8e6:1::/64`；输入 `10`，第一个结果就是 `2001:db8:f8e6:10::/64`。
 
 默认出口模式使用 Routed `/48` 时，脚本会优先使用第一个业务出口地址：
 
 ```text
-2001:470:f8e6:1::1/64
+2001:db8:f8e6:1::1/64
 ```
 
-后续你可以继续把同一个 `/48` 里的其他 `/64`，例如 `2001:470:f8e6:2::/64`、`2001:470:f8e6:3::/64`，分配给 3x-ui、Docker、LXC、虚拟机或其他业务使用。
+后续你可以继续把同一个 `/48` 里的其他 `/64`，例如 `2001:db8:f8e6:2::/64`、`2001:db8:f8e6:3::/64`，分配给 3x-ui、Docker、LXC、虚拟机或其他业务使用。
 
 ## 更新脚本
 
@@ -301,7 +301,7 @@ git pull
 
 ## IPv6 出口模式
 
-本项目区分 Tunnel Client IPv6 与业务出口 IPv6。Tunnel Client IPv6 只用于 HE 隧道通信；实际公网出口使用 Routed /64 或 Routed /48 自动生成的 IPv6。默认出口模式为 Routed /48，会自动使用 `Routed /48` 的第一个 `/64`，例如 `2001:470:f8e6::/48` 会生成 `2001:470:f8e6:1::1/64` 并执行：
+本项目区分 Tunnel Client IPv6 与业务出口 IPv6。Tunnel Client IPv6 只用于 HE 隧道通信；实际公网出口使用 Routed /64 或 Routed /48 自动生成的 IPv6。默认出口模式为 Routed /48，会自动使用 `Routed /48` 的第一个 `/64`，例如 `2001:db8:f8e6::/48` 会生成 `2001:db8:f8e6:1::1/64` 并执行：
 
 ```bash
 ip -6 route replace default dev he-ipv6 src <出口IPv6>
