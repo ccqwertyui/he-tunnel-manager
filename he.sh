@@ -4,7 +4,7 @@
 
 set -o pipefail
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 APP_NAME="HE Tunnel Broker Manager"
 
 CONFIG_DIR="${CONFIG_DIR:-/etc/he-tunnel}"
@@ -566,11 +566,11 @@ ask_required() {
   local input=""
 
   while true; do
-    printf "%s\n" "$prompt"
     if [[ -n "$default" ]]; then
-      printf "当前/默认：%s\n" "$default"
+      printf "%s（当前/默认：%s）" "$prompt" "$default"
+    else
+      printf "%s" "$prompt"
     fi
-    printf "> "
     IFS= read -r input || input=""
     input="${input:-$default}"
 
@@ -582,23 +582,21 @@ ask_required() {
     print_warn "输入不能为空，请重新输入。"
   done
 }
-
 ask_optional() {
   local prompt="$1"
   local var_name="$2"
   local default="${3:-}"
   local input=""
 
-  printf "%s\n" "$prompt"
   if [[ -n "$default" ]]; then
-    printf "当前/默认：%s\n" "$default"
+    printf "%s（当前/默认：%s）" "$prompt" "$default"
+  else
+    printf "%s" "$prompt"
   fi
-  printf "> "
   IFS= read -r input || input=""
   input="${input:-$default}"
   printf -v "$var_name" "%s" "$input"
 }
-
 ask_dns() {
   local var_name="$1"
   local current="${2:-Cloudflare}"
@@ -613,12 +611,17 @@ ask_dns() {
   esac
 
   while true; do
-    printf "请选择 DNS：\n\n"
-    printf "1. HE DNS\n"
-    printf "2. Cloudflare DNS\n"
-    printf "3. Google DNS\n\n"
-    printf "当前/默认：%s\n" "$default_dns"
-    printf "请输入：\n> "
+    printf "请选择 DNS：
+
+"
+    printf "1. HE DNS
+"
+    printf "2. Cloudflare DNS
+"
+    printf "3. Google DNS
+
+"
+    printf "请输入（当前/默认：%s）：" "$default_dns"
     IFS= read -r choice || choice=""
 
     case "$choice" in
@@ -648,7 +651,6 @@ ask_dns() {
     esac
   done
 }
-
 ask_exit_mode() {
   local var_name="$1"
   local current="${2:-48}"
@@ -660,11 +662,15 @@ ask_exit_mode() {
   esac
 
   while true; do
-    printf "请选择 IPv6 出口模式：\n\n"
-    printf "1. Routed /64\n"
-    printf "2. Routed /48（推荐，默认）\n\n"
-    printf "当前/默认：Routed /%s\n" "$current"
-    printf "请输入：\n> "
+    printf "请选择 IPv6 出口模式：
+
+"
+    printf "1. Routed /64
+"
+    printf "2. Routed /48（推荐，默认）
+
+"
+    printf "请输入（当前/默认：Routed /%s）：" "$current"
     IFS= read -r choice || choice=""
 
     case "$choice" in
@@ -682,14 +688,13 @@ ask_exit_mode() {
     esac
   done
 }
-
 ask_mtu() {
   local var_name="$1"
   local default="${2:-1280}"
   local input=""
 
   while true; do
-    printf "请输入 MTU：\n\n默认：\n%s\n\n请输入：\n> " "$default"
+    printf "请输入 MTU（默认：%s）：" "$default"
     IFS= read -r input || input=""
     input="${input:-$default}"
 
@@ -701,7 +706,6 @@ ask_mtu() {
     print_warn "MTU 建议范围为 1280-1480，请重新输入。"
   done
 }
-
 ask_yes_no() {
   local prompt="$1"
   local var_name="$2"
@@ -709,7 +713,7 @@ ask_yes_no() {
   local input=""
 
   while true; do
-    printf "%s\n\nY/N\n\n> " "$prompt"
+    printf "%s（Y/N，默认：%s）：" "$prompt" "$default"
     IFS= read -r input || input=""
     input="${input:-$default}"
 
@@ -728,7 +732,6 @@ ask_yes_no() {
     esac
   done
 }
-
 confirm_action() {
   local prompt="$1"
   local default="${2:-N}"
@@ -873,10 +876,11 @@ modify_tunnel_interactive() {
     printf "4. 修改 Client IPv6\n"
     printf "5. 修改 Routed /64\n"
     printf "6. 修改 Routed /48\n"
-    printf "7. 修改 DNS\n"
-    printf "8. 修改 MTU\n"
-    printf "9. 返回\n\n"
-    printf "请选择：\n> "
+    printf "7. 修改 IPv6 出口模式\n"
+    printf "8. 修改 DNS\n"
+    printf "9. 修改 MTU\n"
+    printf "10. 返回\n\n"
+    printf "请选择："
 
     local choice=""
     IFS= read -r choice || choice=""
@@ -904,9 +908,7 @@ modify_tunnel_interactive() {
         ask_exit_mode EXIT_MODE "$EXIT_MODE"
         save_config || { pause; continue; }
         if tunnel_exists; then
-          printf "
-正在切换出口模式，无需重建隧道...
-"
+          printf "\n正在切换出口模式，无需重建隧道...\n"
           apply_exit_route
           pause
           continue
@@ -1154,7 +1156,7 @@ firewall_menu() {
     printf "2. 关闭基础 IPv6 防火墙\n"
     printf "3. 查看当前 IPv6 防火墙规则\n"
     printf "4. 返回\n\n"
-    printf "请选择：\n> "
+    printf "请选择："
 
     local choice=""
     IFS= read -r choice || choice=""
@@ -1206,7 +1208,7 @@ autostart_menu() {
     printf "3. 立即重启 systemd 隧道服务\n"
     printf "4. 查看服务状态\n"
     printf "5. 返回\n\n"
-    printf "请选择：\n> "
+    printf "请选择："
 
     local choice=""
     IFS= read -r choice || choice=""
@@ -1313,7 +1315,7 @@ ipv6_48_generator() {
     ask_optional "请输入 Routed /48：" prefix "$prefix"
   fi
 
-  printf "生成多少个 /64？\n默认：10\n> "
+  printf "生成多少个 /64？默认：10："
   IFS= read -r count || count=""
   count="${count:-10}"
 
@@ -1322,7 +1324,7 @@ ipv6_48_generator() {
     count="10"
   fi
 
-  printf "起始子网 ID（十六进制，默认 0）：\n> "
+  printf "起始子网 ID（十六进制，默认 0）："
   IFS= read -r start_hex || start_hex=""
   start_hex="${start_hex:-0}"
 
@@ -1484,7 +1486,7 @@ main_menu() {
     printf "11. /48 IPv6 生成器\n"
     printf "12. 更新脚本\n"
     printf "13. 退出\n\n"
-    printf "请选择：\n> "
+    printf "请选择："
 
     local choice=""
     IFS= read -r choice || choice=""
